@@ -1,48 +1,98 @@
 import pandas as pd
-import requests
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
+# ---------------- Load URLs ----------------
 df = pd.read_excel("urls.xlsx")
-urls = df["URL"]
+urls = df["URL"].tolist()
 
-status_list = []
+# Messages for detection
+deleted_msgs = [
+    "게시물이 삭제되었거나 다른 페이지로 변경되었습니다",
+    "존재하지",
+    "찾을 수 없"
+]
+private_msgs = [
+    "비공개 글 입니다"
+]
+# Main content containers to check
+content_containers = ["se-main-container", "se_component_wrap"]
 
-headers = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/142.0.0.0 Safari/537.36"
-    )
-}
+# ---------------- Playwright Checker ----------------
+def check_urls(urls):
+    status_list = []
 
-for url in urls:
-    try:
-        r = requests.get(url, headers=headers, timeout=5, allow_redirects=True)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
 
-        if r.status_code >= 400:
-            status_list.append("Dead")
-            continue
+        for idx, url in enumerate(urls, start=1):
+            print(f"[{idx}/{len(urls)}] Checking: {url}")
+            try:
+                page = browser.new_page()
+                status = "Alive"  # default
 
-        page_text = r.text
+                # Handler for popups/dialogs
+                def dialog_handler(dialog):
+                    nonlocal status
+                    msg = dialog.message
+                    if any(d in msg for d in deleted_msgs):
+                        status = "Deleted"
+                    elif any(d in msg for d in private_msgs):
+                        status = "Private"
+                    dialog.dismiss()
 
-        # Deleted first (more specific)
-        if any(x in page_text for x in ["삭제", "존재하지", "찾을 수 없"]):
-            status_list.append("Deleted")
+                page.on("dialog", dialog_handler)
 
-        # Private (no content containers)
-        elif (
-            "se-main-container" not in page_text
-            and "se_component_wrap" not in page_text
-            and "<iframe" not in page_text
-        ):
-            status_list.append("Private")
+                # Navigate to URL
+                try:
+                    response = page.goto(url, timeout=20000)
+                    if response is None or response.status >= 400:
+                        status = "Dead"
+                        page.close()
+                        status_list.append(status)
+                        continue
+                except PlaywrightTimeoutError:
+                    status = "Dead"
+                    page.close()
+                    status_list.append(status)
+                    continue
 
-        else:
-            status_list.append("Alive")
+                # Wait for JS rendering
+                page.wait_for_timeout(3000)
 
-    except requests.exceptions.RequestException:
-        status_list.append("Dead")
+                # Check main containers for private/deleted messages
+                found_container = False
+                for container in content_containers:
+                    if page.locator(f".{container}").count() > 0:
+                        found_container = True
+                        container_text = page.locator(f".{container}").inner_text()
+                        if any(d in container_text for d in deleted_msgs):
+                            status = "Deleted"
+                            break
+                        elif any(d in container_text for d in private_msgs):
+                            status = "Private"
+                            break
 
-df["Status"] = status_list
-df.to_excel("urls_checked.xlsx", index=False)
+                # Fallback: check full body text if no container matched
+                if not found_container and status == "Alive":
+                    body_text = page.inner_text("body")
+                    if any(d in body_text for d in deleted_msgs):
+                        status = "Deleted"
+                    elif any(d in body_text for d in private_msgs):
+                        status = "Private"
 
-print("Done! Results saved to urls_checked.xlsx")
+                page.close()
+
+            except Exception:
+                status = "Dead"
+
+            status_list.append(status)
+
+        browser.close()
+
+    return status_list
+
+# ---------------- Run Checker ----------------
+statuses = check_urls(urls)
+df["Status"] = statuses
+df.to_excel("urls_checked_playwright.xlsx", index=False)
+print("Done! Results saved to urls_checked_playwright.xlsx")
