@@ -11,10 +11,9 @@ def check_urls(urls):
     results = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=False)
 
         for idx, url in enumerate(urls, start=1):
-            print(f"[{idx}/{len(urls)}] Checking: {url}")
             status = "Alive"
             page = browser.new_page()
 
@@ -39,6 +38,7 @@ def check_urls(urls):
             except Exception:
                 status = "Dead"
             finally:
+                print(f"[{idx}/{len(urls)}] {url} {status}")
                 page.close()
                 results.append(status)
 
